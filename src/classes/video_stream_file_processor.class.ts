@@ -20,15 +20,41 @@ import crypto from 'node:crypto';
 import {RedisStreamChunkStatus} from '../types/redis_stream_chunk_status.type';
 import {logger} from '../utils/logger';
 
+/**
+ * VideoStreamFileProcessor
+ *
+ * This class handles the core functionality of watching for video files, processing them into chunks,
+ * and uploading them to MinIO storage. It implements a streaming approach where files can be processed
+ * while they are still being written.
+ *
+ * Key features:
+ * - Directory watching for new and modified MP4 files
+ * - Chunk-based processing for efficient handling of large files
+ * - Stream timeout mechanism to handle file completion
+ * - Redis-based metadata tracking for each stream
+ * - MinIO storage integration with chunked uploads
+ * - Prometheus metrics for monitoring
+ */
 export class VideoStreamFileProcessor {
   private readonly redis_client: ReturnType<typeof createRedisClient>;
   private readonly minio_client: MinioClient;
   private readonly config: Required<VideoStreamFileProcessorConfig>;
 
+  /**
+   * Maps file paths to their timeout handlers.
+   * Used to track when a file has stopped being written to.
+   */
   private file_stream_timeouts: Map<string, NodeJS.Timeout> = new Map();
 
+  /**
+   * Tracks which files have been initialized in the system.
+   * Prevents duplicate processing of the same file.
+   */
   private file_initialized: Map<string, boolean> = new Map();
 
+  /**
+   * Redis key used to maintain the mapping between file paths and their stream IDs
+   */
   private file_mapping_key = 'file_to_stream_mapping';
 
   constructor(config: VideoStreamFileProcessorConfig) {
@@ -61,6 +87,10 @@ export class VideoStreamFileProcessor {
     });
   }
 
+  /**
+   * Starts watching the configured directory for new and modified files.
+   * Initializes Redis and MinIO connections before starting the watcher.
+   */
   async start_watching() {
     logger.info(`Watching directory: ${this.config.watch_directory}`);
 
@@ -81,17 +111,20 @@ export class VideoStreamFileProcessor {
 
     watcher.on('add', (path) => {
       this.extend_stream_timeout(path);
-
       this.process_new_file(path);
     });
 
     watcher.on('change', (path) => {
       this.extend_stream_timeout(path);
-
       this.process_updated_file(path);
     });
   }
 
+  /**
+   * Extends or creates a timeout for a file stream.
+   * If no changes are detected within the timeout period, the stream is considered complete.
+   * @param file_path Path to the file being monitored
+   */
   private extend_stream_timeout(file_path: string) {
     const timeout = this.file_stream_timeouts.get(file_path);
 
@@ -104,6 +137,19 @@ export class VideoStreamFileProcessor {
     );
   }
 
+  /**
+   * Finalizes a stream by processing any remaining data and cleaning up resources.
+   * This is called when a file has stopped being written to (stream timeout).
+   *
+   * Process:
+   * 1. Process any remaining file data
+   * 2. Update stream metadata to completed status
+   * 3. Generate and upload final metadata JSON
+   * 4. Update metrics
+   * 5. Clean up Redis entries
+   *
+   * @param file_path Path to the file being finalized
+   */
   private async finalize_stream(file_path: string) {
     await this.process_updated_file(file_path, true);
 
@@ -165,12 +211,21 @@ export class VideoStreamFileProcessor {
     total_files_processed.inc();
     total_storage_used.inc(redis_metadata.file_size || 0);
 
+    /**
+     * Since we are cleaning up the stream from Redis, above code is
+     * redundant, but it is kept for future reference.
+     */
     await Promise.all([
       this.redis_client.hDel(this.file_mapping_key, file_path),
       this.redis_client.del(`stream:${stream_id}:metadata`)
     ]);
   }
 
+  /**
+   * Processes a newly detected file.
+   * Only processes MP4 files and checks if they already exist in storage.
+   * @param file_path Path to the new file
+   */
   private async process_new_file(file_path: string) {
     if (!file_path.endsWith('.mp4')) {
       return;
@@ -183,6 +238,11 @@ export class VideoStreamFileProcessor {
     });
   }
 
+  /**
+   * Initializes metadata for a new stream.
+   * Checks if the file already exists in storage to prevent duplicate processing.
+   * @param file_path Path to the file being initialized
+   */
   private async initialize_stream_metadata(file_path: string) {
     /**
      * Check does file with this hash already exists in S3.
@@ -318,6 +378,21 @@ export class VideoStreamFileProcessor {
     logger.info(`Processed updated file: ${file_path}`);
   }
 
+  /**
+   * Processes a chunk of a video file.
+   * Reads the specified chunk from the file and uploads it to MinIO.
+   *
+   * Process:
+   * 1. Create a read stream for the specific chunk
+   * 2. Convert stream to buffer
+   * 3. Validate chunk size (unless ignored)
+   * 4. Upload chunk to MinIO
+   *
+   * @param stream_id Unique identifier for the stream
+   * @param file_path Path to the video file
+   * @param chunk_index Index of the chunk to process
+   * @param ignore_chunk_size Whether to ignore chunk size validation
+   */
   private async process_chunk(stream_id: string, file_path: string, chunk_index: number, ignore_chunk_size = false) {
     logger.info(`Processing chunk: ${chunk_index}`);
 
@@ -347,6 +422,20 @@ export class VideoStreamFileProcessor {
     await this.upload_chunk(stream_id, file_path, buffer, chunk_index);
   }
 
+  /**
+   * Uploads a chunk to MinIO and updates its status in Redis.
+   *
+   * Process:
+   * 1. Generate MinIO key for the chunk
+   * 2. Update chunk metadata in Redis
+   * 3. Upload chunk to MinIO
+   * 4. Update chunk status based on upload result
+   *
+   * @param stream_id Unique identifier for the stream
+   * @param file_path Path to the video file
+   * @param chunk_data Buffer containing the chunk data
+   * @param chunk_index Index of the chunk being uploaded
+   */
   private async upload_chunk(stream_id: string, file_path: string, chunk_data: Buffer, chunk_index: number) {
     const metadata_key = `stream:${stream_id}:metadata`;
     const metadata = await this.get_stream_metadata(stream_id);
@@ -356,7 +445,7 @@ export class VideoStreamFileProcessor {
       return;
     }
 
-    const minio_key = `data/${stream_id}/${path.basename(file_path)}.chunk.${chunk_index}`
+    const minio_key = `data/${stream_id}/${path.basename(file_path)}.chunk.${chunk_index}`;
 
     /**
      * Add chunk to metadata.chunks.items
@@ -380,15 +469,20 @@ export class VideoStreamFileProcessor {
       chunk_data.length
     ).then(() => {
       logger.info(`Chunk ${chunk_index} uploaded successfully`);
-
       return this.update_stream_chunk_status(stream_id, chunk_index, 'completed');
     }).catch((error) => {
       logger.error(`Error uploading chunk ${chunk_index}:`, error);
-
       return this.update_stream_chunk_status(stream_id, chunk_index, 'failed');
     });
   }
 
+  /**
+   * Updates or inserts stream metadata in Redis.
+   * Merges new metadata with existing metadata if present.
+   *
+   * @param stream_id Unique identifier for the stream
+   * @param new_metadata New metadata to merge with existing metadata
+   */
   private async upsert_stream_metadata(stream_id: string, new_metadata: Partial<RedisStreamMetadata>) {
     const metadata_key = `stream:${stream_id}:metadata`;
     const metadata = await this.get_stream_metadata(stream_id);
@@ -406,6 +500,14 @@ export class VideoStreamFileProcessor {
     await this.redis_client.expire(metadata_key, 24 * 60 * 60);
   }
 
+  /**
+   * Updates the status of a specific chunk in the stream metadata.
+   * Also increments the total chunks uploaded metric.
+   *
+   * @param stream_id Unique identifier for the stream
+   * @param chunk_index Index of the chunk to update
+   * @param status New status for the chunk
+   */
   private async update_stream_chunk_status(stream_id: string, chunk_index: number, status: RedisStreamChunkStatus) {
     const metadata_key = `stream:${stream_id}:metadata`;
     const metadata = await this.get_stream_metadata(stream_id);
@@ -429,10 +531,20 @@ export class VideoStreamFileProcessor {
     await this.redis_client.expire(metadata_key, 24 * 60 * 60);
   }
 
+  /**
+   * Retrieves the stream ID associated with a file path from Redis.
+   * @param file_path Path to the video file
+   * @returns The stream ID if found, null otherwise
+   */
   private async get_stream_id_by_file_path(file_path: string) {
     return this.redis_client.hGet(this.file_mapping_key, file_path);
   }
 
+  /**
+   * Retrieves the metadata for a stream from Redis.
+   * @param stream_id Unique identifier for the stream
+   * @returns The stream metadata if found, null otherwise
+   */
   private async get_stream_metadata(stream_id: string): Promise<RedisStreamMetadata | null> {
     const metadata_key = `stream:${stream_id}:metadata`;
     const metadata_data = await this.redis_client.get(metadata_key);
@@ -441,11 +553,19 @@ export class VideoStreamFileProcessor {
       : null;
   }
 
+  /**
+   * Initializes the Redis connection.
+   * Must be called before using any Redis functionality.
+   */
   private async initialize_redis() {
     await this.redis_client.connect();
     logger.info('Connected to Redis');
   }
 
+  /**
+   * Initializes the MinIO connection and ensures the required bucket exists.
+   * Creates the bucket if it doesn't exist.
+   */
   private async initialize_minio() {
     const bucket_exists = await this.minio_client.bucketExists(this.config.bucket_name);
 
