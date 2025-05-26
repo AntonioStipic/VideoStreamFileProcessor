@@ -5,13 +5,11 @@
   "main": "src/index.ts",
   "scripts": {
     "start": "docker-compose up",
-    "start:detached": "docker-compose up -d",
     "stop": "docker-compose down",
     "start:node": "node dist/index.js",
-    "start:generate_video": "ts-node-dev --respawn --transpile-only src/generate_video.ts",
+    "start:generate_video": "ts-node src/generate_video.ts",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
-    "build": "tsc",
-    "start:redis:minio": "docker-compose up -d redis redis-insights minio"
+    "build": "tsc"
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "1.1.0",
