@@ -21,5 +21,10 @@ app.listen(PORT, () => {
 const processor = new VideoStreamFileProcessor({
   watch_directory: 'test_videos',
   stream_timeout: 30_000
+  /**
+   * Suggested chunk size is 16kb when using `npm run generate_video`
+   * so you can see the processing in real-time
+   */
+  // chunk_size: 16 * 1024
 });
 processor.start_watching();

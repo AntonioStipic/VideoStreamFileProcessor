@@ -25,7 +25,7 @@ import {logger} from '../utils/logger';
 /**
  * Maximum number of retry attempts for network operations
  */
-const MAX_RETRIES = 5;
+const MAX_RETRIES = 10;
 
 /**
  * Delay between retries in milliseconds (exponential backoff)
@@ -117,6 +117,8 @@ export class VideoStreamFileProcessor {
        */
       ignored: /(^|[\/\\])\../,
       persistent: true,
+      usePolling: true,
+      interval: 1000,
       awaitWriteFinish: {
         stabilityThreshold: 2000,
         pollInterval: 100
@@ -140,6 +142,11 @@ export class VideoStreamFileProcessor {
    * @param file_path Path to the file being monitored
    */
   private extend_stream_timeout(file_path: string) {
+    if (!this.file_initialized.get(file_path)) {
+      logger.info(`[extend_stream_timeout] File not initialized: ${file_path}. Skipping...`);
+      return;
+    }
+
     const timeout = this.file_stream_timeouts.get(file_path);
 
     if (timeout) {
@@ -165,12 +172,19 @@ export class VideoStreamFileProcessor {
    * @param file_path Path to the file being finalized
    */
   private async finalize_stream(file_path: string) {
+
+    if (!this.file_initialized.get(file_path)) {
+      logger.info(`[finalize_stream] File not initialized: ${file_path}. Skipping...`);
+      return;
+    }
+
+    logger.info(`[finalize_stream start]: Finalizing stream for file: ${file_path}`);
     await this.process_updated_file(file_path, true);
 
     const stream_id = await this.get_stream_id_by_file_path(file_path);
 
     if (!stream_id) {
-      logger.info(`[FINAL]: No stream mapping found for file: ${file_path}`);
+      logger.info(`[finalize_stream]: No stream mapping found for file: ${file_path}`);
       return;
     }
 
@@ -233,8 +247,10 @@ export class VideoStreamFileProcessor {
       this.redis_client.hDel(this.file_mapping_key, file_path),
       this.redis_client.del(`stream:${stream_id}:metadata`)
     ]).catch((error) => {
-      logger.error('Error cleaning up stream:', error);
+      logger.error('[finalize_stream error] cleaning up stream:', error);
     });
+
+    logger.info(`[finalize_stream end]: Finalized stream for file: ${file_path}`);
   }
 
   /**
@@ -283,6 +299,8 @@ export class VideoStreamFileProcessor {
 
       return id || uuidv4();
     });
+
+    this.extend_stream_timeout(file_path);
 
     active_streams.inc();
 
@@ -339,10 +357,11 @@ export class VideoStreamFileProcessor {
     }
 
     if (!this.file_initialized.get(file_path)) {
+      logger.info(`[process_updated_file] File not initialized: ${file_path}. Skipping...`);
       return;
     }
 
-    logger.info(`Processing updated file: ${file_path}`);
+    logger.info(`[process_updated_file start]: ${file_path}`);
 
     /**
      * TODO: Implement caching mechanism so we don't query Redis every time
@@ -391,7 +410,7 @@ export class VideoStreamFileProcessor {
       await this.process_chunk(stream_id, file_path, i, ignore_last_chunk_size && i === total_chunks - 1);
     }
 
-    logger.info(`Processed updated file: ${file_path}`);
+    logger.info(`[process_updated_file end]: ${file_path}`);
   }
 
   /**
