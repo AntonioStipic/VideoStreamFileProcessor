@@ -8,6 +8,8 @@ import {get_video_duration} from '../utils/get_video_duration';
 import path from 'node:path';
 import {
   active_streams,
+  failed_uploads,
+  retry_attempts,
   stream_processing_duration,
   total_chunks_uploaded,
   total_files_processed,
@@ -19,6 +21,16 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import {RedisStreamChunkStatus} from '../types/redis_stream_chunk_status.type';
 import {logger} from '../utils/logger';
+
+/**
+ * Maximum number of retry attempts for network operations
+ */
+const MAX_RETRIES = 5;
+
+/**
+ * Delay between retries in milliseconds (exponential backoff)
+ */
+const RETRY_DELAY = 1000;
 
 /**
  * VideoStreamFileProcessor
@@ -34,6 +46,8 @@ import {logger} from '../utils/logger';
  * - Redis-based metadata tracking for each stream
  * - MinIO storage integration with chunked uploads
  * - Prometheus metrics for monitoring
+ * - Retry mechanisms for network failures
+ * - Error handling for connection issues
  */
 export class VideoStreamFileProcessor {
   private readonly redis_client: ReturnType<typeof createRedisClient>;
@@ -218,7 +232,9 @@ export class VideoStreamFileProcessor {
     await Promise.all([
       this.redis_client.hDel(this.file_mapping_key, file_path),
       this.redis_client.del(`stream:${stream_id}:metadata`)
-    ]);
+    ]).catch((error) => {
+      logger.error('Error cleaning up stream:', error);
+    });
   }
 
   /**
@@ -423,12 +439,60 @@ export class VideoStreamFileProcessor {
   }
 
   /**
+   * Uploads a chunk to MinIO with retry mechanism for network failures.
+   *
+   * @param stream_id Unique identifier for the stream
+   * @param file_path Path to the video file
+   * @param chunk_data Buffer containing the chunk data
+   * @param chunk_index Index of the chunk being uploaded
+   * @param retry_count Current retry attempt number
+   */
+  private async upload_chunk_with_retry(
+    stream_id: string,
+    file_path: string,
+    chunk_data: Buffer,
+    chunk_index: number,
+    retry_count = 0
+  ): Promise<void> {
+    try {
+      const minio_key = `data/${stream_id}/${path.basename(file_path)}.chunk.${chunk_index}`;
+
+      await this.minio_client.putObject(
+        this.config.bucket_name,
+        minio_key,
+        chunk_data,
+        chunk_data.length
+      );
+
+      logger.info(`Chunk ${chunk_index} uploaded successfully`);
+      await this.update_stream_chunk_status(stream_id, chunk_index, 'completed');
+    } catch (error) {
+      if (retry_count < MAX_RETRIES) {
+        /**
+         * Increase the delay between retries exponentially
+         */
+        const delay = RETRY_DELAY * Math.pow(2, retry_count);
+        retry_attempts.inc();
+        logger.warn(`Upload failed for chunk ${chunk_index}, retrying in ${delay}ms (attempt ${retry_count + 1}/${MAX_RETRIES})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return this.upload_chunk_with_retry(stream_id, file_path, chunk_data, chunk_index, retry_count + 1);
+      } else {
+        failed_uploads.inc();
+        logger.error(`Failed to upload chunk ${chunk_index} after ${MAX_RETRIES} attempts:`, error);
+        await this.update_stream_chunk_status(stream_id, chunk_index, 'failed');
+        throw error;
+      }
+    }
+  }
+
+  /**
    * Uploads a chunk to MinIO and updates its status in Redis.
+   * Now includes retry mechanism for network failures.
    *
    * Process:
    * 1. Generate MinIO key for the chunk
    * 2. Update chunk metadata in Redis
-   * 3. Upload chunk to MinIO
+   * 3. Upload chunk to MinIO with retry mechanism
    * 4. Update chunk status based on upload result
    *
    * @param stream_id Unique identifier for the stream
@@ -459,21 +523,16 @@ export class VideoStreamFileProcessor {
       created_on: Date.now()
     };
 
-    await this.redis_client.set(metadata_key, JSON.stringify(metadata));
-    await this.redis_client.expire(metadata_key, 24 * 60 * 60);
+    try {
+      await this.redis_client.set(metadata_key, JSON.stringify(metadata));
+      await this.redis_client.expire(metadata_key, 24 * 60 * 60);
 
-    await this.minio_client.putObject(
-      this.config.bucket_name,
-      minio_key,
-      chunk_data,
-      chunk_data.length
-    ).then(() => {
-      logger.info(`Chunk ${chunk_index} uploaded successfully`);
-      return this.update_stream_chunk_status(stream_id, chunk_index, 'completed');
-    }).catch((error) => {
-      logger.error(`Error uploading chunk ${chunk_index}:`, error);
-      return this.update_stream_chunk_status(stream_id, chunk_index, 'failed');
-    });
+      await this.upload_chunk_with_retry(stream_id, file_path, chunk_data, chunk_index);
+    } catch (error) {
+      logger.error(`Error in upload_chunk for chunk ${chunk_index}:`, error);
+      await this.update_stream_chunk_status(stream_id, chunk_index, 'failed');
+      throw error;
+    }
   }
 
   /**
@@ -554,24 +613,54 @@ export class VideoStreamFileProcessor {
   }
 
   /**
-   * Initializes the Redis connection.
+   * Initializes the Redis connection with retry mechanism.
    * Must be called before using any Redis functionality.
    */
   private async initialize_redis() {
-    await this.redis_client.connect();
-    logger.info('Connected to Redis');
+    let retry_count = 0;
+    while (retry_count < MAX_RETRIES) {
+      try {
+        await this.redis_client.connect();
+        logger.info('Connected to Redis');
+        return;
+      } catch (error) {
+        retry_count++;
+        if (retry_count === MAX_RETRIES) {
+          logger.error('Failed to connect to Redis after maximum retries:', error);
+          throw error;
+        }
+        const delay = RETRY_DELAY * Math.pow(2, retry_count);
+        logger.warn(`Redis connection failed, retrying in ${delay}ms (attempt ${retry_count}/${MAX_RETRIES})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
   }
 
   /**
-   * Initializes the MinIO connection and ensures the required bucket exists.
+   * Initializes the MinIO connection with retry mechanism.
    * Creates the bucket if it doesn't exist.
    */
   private async initialize_minio() {
-    const bucket_exists = await this.minio_client.bucketExists(this.config.bucket_name);
+    let retry_count = 0;
+    while (retry_count < MAX_RETRIES) {
+      try {
+        const bucket_exists = await this.minio_client.bucketExists(this.config.bucket_name);
 
-    if (!bucket_exists) {
-      await this.minio_client.makeBucket(this.config.bucket_name);
-      logger.info(`Created bucket: ${this.config.bucket_name}`);
+        if (!bucket_exists) {
+          await this.minio_client.makeBucket(this.config.bucket_name);
+          logger.info(`Created bucket: ${this.config.bucket_name}`);
+        }
+        return;
+      } catch (error) {
+        retry_count++;
+        if (retry_count === MAX_RETRIES) {
+          logger.error('Failed to initialize MinIO after maximum retries:', error);
+          throw error;
+        }
+        const delay = RETRY_DELAY * Math.pow(2, retry_count);
+        logger.warn(`MinIO initialization failed, retrying in ${delay}ms (attempt ${retry_count}/${MAX_RETRIES})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
     }
   }
 }

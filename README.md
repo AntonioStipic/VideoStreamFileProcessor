@@ -33,8 +33,10 @@ A robust file processing system that watches for video files, processes them int
    - Node.js API: http://localhost:3000
    - MinIO Console: http://localhost:9001 (login with minioadmin/minioadmin)
    - Grafana: http://localhost:3001 (login with admin/admin)
-   - Prometheus: http://localhost:9090
    - Redis Insights: http://localhost:5540
+     - The Redis database is automatically configured with `redis://redis:6379`
+     - If you need to add it manually, use the same connection string
+   - Prometheus: http://localhost:9090
 
 5. Video Processing:
    - Place any MP4 file in the `test_videos` directory in the project root

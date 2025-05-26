@@ -34,6 +34,22 @@ export const total_storage_used = new Gauge({
   registers: [register]
 });
 
+/**
+ * Counter for failed uploads
+ */
+export const failed_uploads = new Counter({
+  name: 'video_processor_failed_uploads_total',
+  help: 'Total number of failed uploads after all retry attempts'
+});
+
+/**
+ * Counter for retry attempts
+ */
+export const retry_attempts = new Counter({
+  name: 'video_processor_retry_attempts_total',
+  help: 'Total number of retry attempts for failed operations'
+});
+
 export function setup_metrics(app: express.Application) {
   app.get('/metrics', async (request, response) => {
     try {
