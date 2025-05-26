@@ -49,6 +49,8 @@ Built-in metrics include:
 
 ### Video Processing Dashboard
 
+![Video Processing Dashboard](img/dashboards/node.png)
+
 1. **Processing Statistics Panel**
    - Total files processed
    - Total chunks uploaded
@@ -67,6 +69,8 @@ Built-in metrics include:
 
 ### MinIO Dashboard
 
+![MinIO Dashboard](img/dashboards/minio.png)
+
 1. **Storage Metrics**
    - Total disk usage
    - Available space
@@ -81,6 +85,25 @@ Built-in metrics include:
    - Traffic received
    - Traffic sent
    - Bandwidth usage
+
+### Redis Dashboard
+
+![Redis Dashboard](img/dashboards/redis.png)
+
+1. **Memory Usage**
+   - Current memory usage
+   - Memory limit
+   - Usage trends
+
+2. **Client Connections**
+   - Active connections
+   - Connection rate
+   - Client statistics
+
+3. **Command Statistics**
+   - Command execution rates
+   - Command latency
+   - Error rates
 
 ## Alerting
 
