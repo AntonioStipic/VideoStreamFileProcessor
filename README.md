@@ -15,7 +15,7 @@ A robust file processing system that watches for video files, processes them int
 
 1. Clone the repository:
    ```bash
-   git clone <repository-url>
+   git clone git@github.com:AntonioStipic/VideoStreamFileProcessor.git
    cd VideoStreamFileProcessor
    ```
 
