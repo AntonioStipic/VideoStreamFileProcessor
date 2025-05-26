@@ -52,7 +52,6 @@ services:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin
       - MINIO_PROMETHEUS_AUTH_TYPE=public
-      - MINIO_METRICS_AUTH_TYPE=public
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
