@@ -26,6 +26,7 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    command: redis-server --maxmemory 1gb --maxmemory-policy allkeys-lru
 
   redis-insights:
     image: redislabs/redisinsight:latest
