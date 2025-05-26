@@ -67,6 +67,12 @@ export class VideoStreamFileProcessor {
   private file_initialized: Map<string, boolean> = new Map();
 
   /**
+   * Maps file paths to their stream IDs.
+   * Used to track the mapping between file paths and their associated stream IDs.
+   */
+  private file_path_to_stream_id: Map<string, string> = new Map();
+
+  /**
    * Redis key used to maintain the mapping between file paths and their stream IDs
    */
   private file_mapping_key = 'file_to_stream_mapping';
@@ -87,6 +93,7 @@ export class VideoStreamFileProcessor {
 
     this.file_stream_timeouts = new Map();
     this.file_initialized = new Map();
+    this.file_path_to_stream_id = new Map();
 
     this.redis_client = createRedisClient({
       url: process.env.REDIS_URL || 'redis://localhost:6379'
@@ -238,6 +245,7 @@ export class VideoStreamFileProcessor {
     active_streams.dec();
     total_files_processed.inc();
     total_storage_used.inc(redis_metadata.file_size || 0);
+    this.file_path_to_stream_id.delete(file_path);
 
     /**
      * Since we are cleaning up the stream from Redis, above code is
@@ -615,7 +623,19 @@ export class VideoStreamFileProcessor {
    * @returns The stream ID if found, null otherwise
    */
   private async get_stream_id_by_file_path(file_path: string) {
-    return this.redis_client.hGet(this.file_mapping_key, file_path);
+    const cache_stream_id = this.file_path_to_stream_id.get(file_path);
+
+    if (cache_stream_id) {
+      return cache_stream_id;
+    }
+
+    const redis_stream_id = await this.redis_client.hGet(this.file_mapping_key, file_path);
+
+    if (redis_stream_id) {
+      this.file_path_to_stream_id.set(file_path, redis_stream_id);
+    }
+
+    return redis_stream_id;
   }
 
   /**
