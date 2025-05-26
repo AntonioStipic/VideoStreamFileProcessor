@@ -4,6 +4,30 @@ import path from 'path';
 import fs from 'fs';
 import {PassThrough} from 'stream';
 
+/**
+ * Video Generation Service
+ * 
+ * This is a dummy service that simulates a video stream by creating a growing MP4 file.
+ * It uses Puppeteer to record a browser session and continuously writes the recording
+ * to a file, making it grow over time. This simulates a real-world scenario where
+ * a video stream is being recorded and needs to be processed while it's still growing.
+ * 
+ * Key characteristics:
+ * - Creates an MP4 file that continuously grows in size
+ * - Uses Puppeteer to record browser activity
+ * - Simulates a real-time video stream
+ * - Useful for testing the video processing system's ability to handle growing files
+ * 
+ * Usage:
+ * Run the service using:
+ *   npm run start:generate_video
+ * 
+ * This service is meant to be run alongside the main application to generate test data.
+ * The generated video file will be picked up by the file watcher and processed in chunks.
+ * 
+ * Note: This is a development/testing tool and should not be used in production.
+ */
+
 interface VideoGeneratorConfig {
   resolution?: {
     width: number;
