@@ -10,7 +10,8 @@ import {
   active_streams,
   stream_processing_duration,
   total_chunks_uploaded,
-  total_files_processed
+  total_files_processed,
+  total_storage_used
 } from '../utils/prometheus';
 import {minio_object_exists} from '../utils/minio_object_exists';
 import {v4 as uuidv4} from 'uuid';
@@ -162,6 +163,7 @@ export class VideoStreamFileProcessor {
 
     active_streams.dec();
     total_files_processed.inc();
+    total_storage_used.inc(redis_metadata.file_size || 0);
 
     await Promise.all([
       this.redis_client.hDel(this.file_mapping_key, file_path),

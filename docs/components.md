@@ -43,7 +43,7 @@
 - Cache layer
 
 ### Configuration
-- Port: 6379
+- Port: `6379`
 - Persistence enabled
 - Monitoring via Redis Exporter
 - Insights dashboard
@@ -70,8 +70,8 @@
 - Lifecycle management
 
 ### Configuration
-- API Port: 9000
-- Console Port: 9001
+- API Port: `9000`
+- Console Port: `9001`
 - Authentication enabled
 - Metrics exposed
 
