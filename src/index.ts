@@ -9,6 +9,14 @@ import crypto from 'node:crypto';
 import {get_file_hash} from './utils/get_file_hash';
 import {get_video_duration} from './utils/get_video_duration';
 import {minio_object_exists} from './utils/minio_object_exists';
+import {
+  active_streams,
+  setup_metrics,
+  stream_processing_duration,
+  total_chunks_uploaded,
+  total_files_processed
+} from './utils/prometheus';
+import express from 'express';
 
 type RedisStreamChunkStatus = 'processing' | 'completed' | 'failed';
 
@@ -36,12 +44,6 @@ interface RedisStreamMetadata {
   };
 }
 
-const logger = pino({
-  transport: {
-    target: 'pino-pretty'
-  }
-});
-
 interface VideoStreamFileProcessorConfig {
   /**
    * @description Directory to watch for video stream files
@@ -64,11 +66,33 @@ interface VideoStreamFileProcessorConfig {
   bucket_name?: string;
 }
 
+const logger = pino({
+  transport: {
+    target: 'pino-pretty'
+  }
+});
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+setup_metrics(app);
+
+app.get('/health', (request, response) => {
+  response.status(200).json({
+    status: 'healthy'
+  });
+});
+
+// Start the server
+app.listen(port, () => {
+  console.log(`Server is running on port ${port}`);
+  console.log(`Metrics available at http://localhost:${port}/metrics`);
+});
 
 export class VideoStreamFileProcessor {
-  private redis_client: ReturnType<typeof createRedisClient>;
-  private minio_client: MinioClient;
-  private config: Required<VideoStreamFileProcessorConfig>;
+  private readonly redis_client: ReturnType<typeof createRedisClient>;
+  private readonly minio_client: MinioClient;
+  private readonly config: Required<VideoStreamFileProcessorConfig>;
 
   private file_stream_timeouts: Map<string, NodeJS.Timeout> = new Map();
 
@@ -87,6 +111,8 @@ export class VideoStreamFileProcessor {
       chunk_size: config.chunk_size || 10 * 1024 * 1024,
       bucket_name: config.bucket_name || 'videos'
     };
+
+    logger.info(`Config: ${JSON.stringify(this.config, null, 2)}`);
 
     this.file_stream_timeouts = new Map();
     this.file_initialized = new Map();
@@ -186,6 +212,12 @@ export class VideoStreamFileProcessor {
       })
     };
 
+    const stream_process_duration = Date.now() - (redis_metadata?.created_on || Date.now());
+
+    if (stream_process_duration) {
+      stream_processing_duration.observe(stream_process_duration / 1000);
+    }
+
     const buffer = Buffer.from(JSON.stringify(minio_metadata, null, 2), 'utf-8');
 
     await this.minio_client.putObject(
@@ -197,6 +229,9 @@ export class VideoStreamFileProcessor {
         'Content-Type': 'application/json'
       }
     );
+
+    active_streams.dec();
+    total_files_processed.inc();
 
     await Promise.all([
       this.redis_client.hDel(this.file_mapping_key, file_path),
@@ -240,6 +275,8 @@ export class VideoStreamFileProcessor {
 
       return id || uuidv4();
     });
+
+    active_streams.inc();
 
     logger.info(`Initializing stream metadata for ${stream_id} | ${file_path}`);
 
@@ -446,8 +483,15 @@ export class VideoStreamFileProcessor {
       return;
     }
 
+    if (!metadata.chunks.items[chunk_index]) {
+      logger.error(`Chunk ${chunk_index} not found in metadata for stream: ${stream_id}`);
+      return;
+    }
+
     metadata.chunks.items[chunk_index].status = status;
     metadata.chunks.items[chunk_index].completed_on = Date.now();
+
+    total_chunks_uploaded.inc();
 
     await this.redis_client.set(metadata_key, JSON.stringify(metadata));
     await this.redis_client.expire(metadata_key, 24 * 60 * 60);
@@ -482,7 +526,6 @@ export class VideoStreamFileProcessor {
 
 const processor = new VideoStreamFileProcessor({
   watch_directory: 'test_videos',
-  stream_timeout: 30_000,
-  chunk_size: 128 * 1024
+  stream_timeout: 30_000
 });
 processor.start_watching();
